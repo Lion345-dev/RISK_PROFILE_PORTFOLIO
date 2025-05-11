@@ -1,0 +1,47 @@
+#Ignorar archivos de entorno que contienen claves API y tokens
+
+.env
+
+#Ignorar archivos de configuración sensibles
+
+*.key *.pem *.crt
+
+#Ignorar archivos de logs que podrían contener información sensible
+
+*.log
+
+#Ignorar carpetas de caché y temporales
+
+pycache/ *.py[cod] *$py.class
+
+#Ignorar archivos de dependencias locales
+
+venv/ *.venv/
+
+#Ignorar archivos de sistema
+
+.DS_Store Thumbs.db
+
+#Ignorar archivos de configuración de IDE
+
+.vscode/ .idea/
+
+#Ignorar archivos de datos sensibles
+
+*.csv *.json *.xml
+
+#Ignorar archivos de salida
+
+*.pdf *.png *.jpg *.jpeg
+
+#Ignorar archivos de base de datos locales
+
+*.sqlite *.db
+
+I#gnorar archivos de configuración de Docker
+
+docker-compose.yml Dockerfile
+
+#Ignorar archivos de secretos y credenciales adicionales
+
+secrets/ tokens/ credentials/
