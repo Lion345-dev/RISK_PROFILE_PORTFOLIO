@@ -1,9 +1,10 @@
 streamlit
 pandas
 numpy
-plotly
 yfinance
-requests
+plotly
 reportlab
-scipy
+requests
 python-dotenv
+scipy
+anthropic
