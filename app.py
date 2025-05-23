@@ -1,23 +1,22 @@
-import streamlit as st
+import os
+from dotenv import load_dotenv
+import requests
 import pandas as pd
 import numpy as np
-import yfinance as yf
-import plotly.graph_objects as go
-import plotly.express as px
-from datetime import datetime, timedelta
+from scipy.optimize import minimize
+import streamlit as st
 import time
-import requests
+import random
+import yfinance as yf  # Changed from yahooquery to yfinance
+import logging
+from anthropic import Anthropic, APIError
+import visuals  # Importar el módulo visuals para gráficos
 from reportlab.lib.pagesizes import letter
-from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, Image, PageBreak
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, PageBreak, Image
 from reportlab.lib.styles import getSampleStyleSheet
 from reportlab.lib import colors
 import io
-from portfolio import calculate_risk_profile, optimize_portfolio, sharpe_ratio_maximization
-from data import get_risk_free_rate
-from dotenv import load_dotenv
-import os
-import logging
-from anthropic import Anthropic, APIError
+import glob  # For file handling
 
 # Configurar logging
 logging.basicConfig(level=logging.INFO)
@@ -25,53 +24,86 @@ logger = logging.getLogger(__name__)
 
 # Cargar variables de entorno
 load_dotenv()
-GROK_API_KEY = os.getenv("GROK_API_KEY")
+
+# Verificar claves de API
 FINVIZ_API_KEY = os.getenv("FINVIZ_API_KEY")
-ALPHA_VANTAGE_API_KEY = os.getenv("ALPHA_VANTAGE_API_KEY")
 BANXICO_TOKEN = os.getenv("BANXICO_TOKEN")
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")
 
-# Verificar clave de Anthropic
 if not ANTHROPIC_API_KEY:
     st.error("No se encontró la clave API de Anthropic. Configura ANTHROPIC_API_KEY en el archivo .env.")
     st.stop()
 
 # Inicializar cliente de Anthropic
-client = Anthropic(api_key=ANTHROPIC_API_KEY)
+client_anthropic = Anthropic(api_key=ANTHROPIC_API_KEY)
 
 # Configuración de la página
 st.set_page_config(page_title="Perfil de Riesgo y Recomendación de Portafolios", layout="wide")
 
 # Logo y título
-st.image("LogoAllianz.jpeg", width=150)
+try:
+    st.image("LogoAllianz.jpeg", width=150)
+except Exception as e:
+    st.warning(f"No se pudo cargar el logo 'LogoAllianz.jpeg': {str(e)}")
 st.title("Simulador de Perfil de Riesgo y Portafolios")
 
-# Mapeo de tickers a nombres y para filtrado
+# Mapeo de tickers a nombres
 ticker_to_name = {
-    "BOND": "PIMCO Active Bond ETF",
+    "BIL": "SPDR Bloomberg 1-3 Month T-Bill ETF",
     "EWW": "iShares MSCI Mexico ETF",
     "TIP": "iShares TIPS Bond ETF",
-    "LQD": "iShares iBoxx $ Investment Grade Corporate Bond ETF",
-    "EMLC": "VanEck J.P. Morgan EM Local Currency Bond ETF",
-    "VGSH": "Vanguard Short-Term Treasury ETF",
-    "NEAR": "BlackRock Short Duration Bond ETF",
-    "BIL": "SPDR Bloomberg 1-3 Month T-Bill ETF",
-    "SPY": "SPDR S&P 500 ETF Trust",
+    "ACWI": "iShares MSCI ACWI ETF",
+    "SHY": "iShares 1-3 Year Treasury Bond ETF",
+    "IVV": "iShares Core S&P 500 ETF",
+    "IBGS.AS": "iShares Global Govt Bond UCITS ETF",
     "EZU": "iShares MSCI Eurozone ETF",
+    "EPP": "iShares MSCI Pacific ex Japan ETF",
+    "EEM": "iShares MSCI Emerging Markets ETF",
+    "BKF": "iShares MSCI BRIC ETF",
+    "ILF": "iShares Latin America 40 ETF",
+    "SPY": "SPDR S&P 500 ETF Trust",
+    "EWC": "iShares MSCI Canada ETF",
+    "EWZ": "iShares MSCI Brazil ETF",
+    "EWG": "iShares MSCI Germany ETF",
+    "EWQ": "iShares MSCI France ETF",
+    "EWU": "iShares MSCI United Kingdom ETF",
+    "FXI": "iShares China Large-Cap ETF",
+    "EWH": "iShares MSCI Hong Kong ETF",
+    "EWJ": "iShares MSCI Japan ETF",
+    "EWT": "iShares MSCI Taiwan ETF",
+    "EWY": "iShares MSCI South Korea ETF",
+    "EWA": "iShares MSCI Australia ETF",
+    "DIA": "SPDR Dow Jones Industrial Average ETF Trust",
+    "IWM": "iShares Russell 2000 ETF",
+    "ITB": "iShares U.S. Home Construction ETF",
+    "IYH": "iShares U.S. Healthcare ETF",
+    "IYF": "iShares U.S. Financials ETF",
+    "XLF": "Financial Select Sector SPDR Fund",
+    "IEO": "iShares U.S. Oil & Gas Exploration & Production ETF",
+    "QQQ": "Invesco QQQ Trust",
+    "IAU": "iShares Gold Trust",
+    "SLV": "iShares Silver Trust",
+    "DBO": "Invesco DB Oil Fund",
+    "VGSH": "Vanguard Short-Term Treasury ETF",
+    "VGIT": "Vanguard Intermediate-Term Treasury ETF",
+    "AGG": "iShares Core U.S. Aggregate Bond ETF",
 }
 
 ticker_mapping = {
-    "BONDDIAA": "BOND",
-    "NAFTRAC": "EWW",
-    "UDITRAC": "TIP",
-    "IBGS": "LQD",
-    "IPCLARGECAP": "EMLC",
-    "VGIT": "VGSH",
-    "VGSH": "NEAR",
-    "BONDDIAA2": "BIL",  # Manejar duplicado de BONDDIAA.MX
     "SPY": "SPY",
     "EZU": "EZU",
 }
+
+# Definir portafolios
+portafolio_basico = ["BIL", "EWW", "TIP", "ACWI", "SHY", "IVV", "IBGS.AS", "EZU"]
+portafolio_premier = [
+    "ACWI", "EPP", "EEM", "BKF", "ILF", "EZU", "SPY", "EWC", "EWZ", "EWG", "EWQ", "EWU", "FXI",
+    "EWH", "EWJ", "EWT", "EWY", "EWA", "DIA", "IWM", "ITB", "IYH", "IYF", "XLF", "IEO",
+    "QQQ", "IAU", "SLV", "DBO", "TIP", "VGSH", "VGIT", "IBGS.AS", "SHY", "BIL", "AGG"
+]
+
+# Tickers de respaldo confiables
+fallback_tickers = ["SPY", "IVV", "QQQ", "AGG", "TIP"]
 
 # Cuestionario de Perfilamiento
 st.header("Cuestionario de Perfilamiento")
@@ -83,512 +115,780 @@ market_knowledge = st.selectbox("5. Conocimiento del mercado", ["Ninguno", "Bás
 liquidity_need = st.selectbox("6. Necesidad de liquidez", ["Inmediato", "1-6 meses", ">6 meses"], index=0)
 age = st.selectbox("7. Edad", ["<30 años", "30-50 años", ">50 años"], index=0)
 
-# Calcular puntaje
-total_score = (
-    {"Muy bajo": 1, "Bajo": 2, "Moderado": 3, "Alto": 4, "Muy alto": 5}[risk_tolerance] +
-    {"Corto plazo (<1 año)": 1, "Mediano plazo (1-5 años)": 2, "Largo plazo (>5 años)": 3}[investment_horizon] +
-    {"Crecimiento de capital": 2, "Ingresos regulares": 1, "Preservación del capital": 0}[financial_objective] +
-    {"Muy estable": 3, "Estable": 2, "Moderada": 1, "Inestable": 0}[financial_situation] +
-    {"Ninguno": 0, "Básico": 1, "Intermedio": 2, "Avanzado": 3}[market_knowledge] +
-    {"Inmediato": 0, "1-6 meses": 1, ">6 meses": 2}[liquidity_need] +
+# Calcular puntaje y perfil
+def calculate_risk_profile(responses):
+    score = sum(responses)
+    if score <= 6:
+        return "Conservador", score
+    elif score <= 12:
+        return "Moderado", score
+    elif score <= 18:
+        return "Balanceado", score
+    elif score <= 24:
+        return "Crecimiento", score
+    else:
+        return "Oportunidad", score
+
+responses = [
+    {"Muy bajo": 1, "Bajo": 2, "Moderado": 3, "Alto": 4, "Muy alto": 5}[risk_tolerance],
+    {"Corto plazo (<1 año)": 1, "Mediano plazo (1-5 años)": 2, "Largo plazo (>5 años)": 3}[investment_horizon],
+    {"Crecimiento de capital": 2, "Ingresos regulares": 1, "Preservación del capital": 0}[financial_objective],
+    {"Muy estable": 3, "Estable": 2, "Moderada": 1, "Inestable": 0}[financial_situation],
+    {"Ninguno": 0, "Básico": 1, "Intermedio": 2, "Avanzado": 3}[market_knowledge],
+    {"Inmediato": 0, "1-6 meses": 1, ">6 meses": 2}[liquidity_need],
     {"<30 años": 3, "30-50 años": 2, ">50 años": 1}[age]
-)
+]
 
-# Determinar perfil
-if total_score <= 6:
-    profile = "Conservador"
-elif total_score <= 12:
-    profile = "Moderado"
-elif total_score <= 18:
-    profile = "Balanceado"
-elif total_score <= 24:
-    profile = "Crecimiento"
-else:
-    profile = "Oportunidad"
-
+profile, total_score = calculate_risk_profile(responses)
 st.success(f"Tu perfil de inversionista es: {profile} (Puntaje: {total_score})")
 
 # Selección de moneda
 currency = st.multiselect("Selecciona las monedas para tu portafolio", ["MXN", "USD", "EUR"], default=["MXN", "USD", "EUR"])
 
-# Función para recomendar tickers con Claude
-def recomendar_activos_con_claude(perfil, portfolio_type="basic", currencies=["MXN", "USD", "EUR"]):
-    currency_prompt = ", ".join(
-        [f"{c} ({'.MX' if c == 'MXN' else '.DE' if c == 'EUR' else 'sin sufijo'})" for c in currencies]
-    )
-    prompt = f"""
-    Eres un asesor financiero experto. Según el perfil de riesgo '{perfil}', recomienda 5 activos internacionales diversificados
-    (acciones, ETFs o fondos) adecuados para un portafolio {'básico' if portfolio_type == 'basic' else 'premier'}.
-    Los activos deben estar listados en bolsas compatibles con las monedas: {currency_prompt}.
-    Ejemplo de tickers: ["BOND", "EWW", "TIP"]. Devuelve sólo una lista de Python con los tickers.
-    """
-    try:
-        response = client.messages.create(
-            model="claude-3-5-sonnet-20241022",
-            max_tokens=200,
-            temperature=0.7,
-            system="Eres un asesor financiero experto.",
-            messages=[
-                {"role": "user", "content": prompt}
-            ]
-        )
-        content = response.content[0].text
-        tickers = eval(content.strip())
-        # Filtrar tickers por moneda
-        valid_tickers = []
-        for ticker in tickers:
-            if "MXN" in currencies and ticker.endswith('.MX'):
-                valid_tickers.append(ticker)
-            elif "USD" in currencies and not ticker.endswith('.MX') and not ticker.endswith('.DE'):
-                valid_tickers.append(ticker)
-            elif "EUR" in currencies and ticker.endswith('.DE'):
-                valid_tickers.append(ticker)
-        return valid_tickers[:5]
-    except APIError as e:
-        if e.status_code == 429:
-            logger.error("Límite de créditos de Anthropic alcanzado.")
-            return []
-        logger.error(f"Error en la solicitud a Anthropic: {str(e)}")
-        return []
-    except Exception as e:
-        logger.error(f"Error interpretando respuesta de Anthropic: {str(e)}")
-        return []
+# Directorio para almacenar los archivos CSV
+DATA_DIR = "ticker_data"
+if not os.path.exists(DATA_DIR):
+    os.makedirs(DATA_DIR)
 
-# Función para verificar tickers válidos
-@st.cache_data(ttl=86400)
-def validate_tickers(tickers):
+# Función auxiliar para validar DataFrames
+def validate_dataframe(df, name="DataFrame"):
+    if not isinstance(df, pd.DataFrame):
+        logger.error(f"{name} no es un DataFrame, es {type(df)}")
+        return False
+    if df.empty:
+        logger.error(f"{name} está vacío")
+        return False
+    if len(df.columns) == 0:
+        logger.error(f"{name} no tiene columnas")
+        return False
+    if all(df[col].isna().all() for col in df.columns):
+        logger.error(f"{name} contiene solo valores NaN en todas las columnas")
+        return False
+    logger.info(f"{name} validado correctamente: {df.shape} filas y columnas")
+    return True
+
+# Nueva función para descargar datos con yfinance y guardar en CSV
+def download_and_save_ticker_data(ticker, period="5y", max_retries=3):
+    """Descarga datos históricos de yfinance y los guarda en un archivo CSV"""
+    file_path = os.path.join(DATA_DIR, f"{ticker}_close.csv")
+    for attempt in range(max_retries):
+        try:
+            logger.info(f"⏳ Descargando datos de {ticker} con yfinance (Intento {attempt + 1}/{max_retries})...")
+            ticker_obj = yf.Ticker(ticker)
+            data = ticker_obj.history(period=period, interval="1d")
+            if data is not None and not data.empty and 'Close' in data.columns:
+                # Guardar solo la columna 'Close' ajustada
+                data[['Close']].to_csv(file_path)
+                logger.info(f"✅ Datos de {ticker} guardados en {file_path}: {len(data)} filas")
+                return True
+            else:
+                logger.warning(f"⚠️ No se encontraron datos válidos para {ticker} con {period}, intentando 1mo...")
+                data_short = ticker_obj.history(period="1mo", interval="1d")
+                if data_short is not None and not data_short.empty and 'Close' in data_short.columns:
+                    data_short[['Close']].to_csv(file_path)
+                    logger.info(f"✅ Datos de {ticker} (período corto) guardados en {file_path}: {len(data_short)} filas")
+                    return True
+                else:
+                    logger.warning(f"No se encontraron datos válidos para {ticker} incluso con 1mo")
+        except Exception as e:
+            logger.error(f"❌ Error al descargar datos de {ticker} (Intento {attempt + 1}): {str(e)}")
+            if attempt < max_retries - 1:
+                time.sleep(2 ** attempt + random.uniform(0, 1))
+    logger.error(f"No se pudieron descargar datos para {ticker}")
+    return False
+
+# Modificada función para leer datos históricos desde archivos CSV
+def fetch_historical_data(tickers, period="5y", interval="1d", max_retries=3):
+    """Lee datos históricos desde archivos CSV generados previamente"""
+    if not tickers:
+        logger.error("Lista de tickers vacía")
+        return pd.DataFrame()
+
+    prices_df = pd.DataFrame()
+    valid_tickers = []
+    failed_tickers = []
+
+    for ticker in tickers:
+        file_path = os.path.join(DATA_DIR, f"{ticker}_close.csv")
+        if not os.path.exists(file_path):
+            logger.warning(f"No se encontró el archivo {file_path} para {ticker}, intentando descargar...")
+            if not download_and_save_ticker_data(ticker, period=period, max_retries=max_retries):
+                failed_tickers.append(ticker)
+                continue
+
+        try:
+            data = pd.read_csv(file_path, index_col='Date', parse_dates=True)
+            if 'Close' in data.columns and not data['Close'].isna().all():
+                data = data[['Close']].rename(columns={'Close': ticker})
+                prices_df = pd.concat([prices_df, data], axis=1) if not prices_df.empty else data
+                valid_tickers.append(ticker)
+                logger.info(f"✅ Datos de {ticker} leídos desde {file_path}: {len(data)} filas")
+            else:
+                logger.warning(f"⚠️ Datos inválidos en {file_path} para {ticker}")
+                failed_tickers.append(ticker)
+        except Exception as e:
+            logger.error(f"❌ Error al leer {file_path} para {ticker}: {str(e)}")
+            failed_tickers.append(ticker)
+
+    if failed_tickers:
+        st.warning(f"No se encontraron datos históricos para los siguientes tickers: {failed_tickers}")
+        if not valid_tickers and len(failed_tickers) == len(tickers):
+            logger.warning("Todos los tickers fallaron, usando tickers de respaldo")
+            for fb_ticker in fallback_tickers:
+                file_path = os.path.join(DATA_DIR, f"{fb_ticker}_close.csv")
+                if not os.path.exists(file_path):
+                    if not download_and_save_ticker_data(fb_ticker, period=period, max_retries=max_retries):
+                        continue
+                try:
+                    data = pd.read_csv(file_path, index_col='Date', parse_dates=True)
+                    if 'Close' in data.columns and not data['Close'].isna().all():
+                        data = data[['Close']].rename(columns={'Close': fb_ticker})
+                        prices_df = pd.concat([prices_df, data], axis=1) if not prices_df.empty else data
+                        valid_tickers.append(fb_ticker)
+                        logger.info(f"✅ Datos de respaldo {fb_ticker} leídos desde {file_path}: {len(data)} filas")
+                except Exception as e:
+                    logger.error(f"❌ Error con ticker de respaldo {fb_ticker}: {str(e)}")
+
+    if prices_df.empty:
+        logger.error("DataFrame inicial vacío antes de dropna")
+        return pd.DataFrame()
+
+    logger.info(f"Estado de prices_df antes de dropna: {prices_df.shape}, NaN total: {prices_df.isna().sum().sum()}")
+    prices_df = prices_df.dropna(how='all')
+    logger.info(f"Estado de prices_df después de dropna: {prices_df.shape}, NaN total: {prices_df.isna().sum().sum()}")
+
+    if prices_df.empty:
+        logger.error("DataFrame vacío después de dropna")
+        return pd.DataFrame()
+
+    prices_df = prices_df.apply(pd.to_numeric, errors='coerce')
+
+    if not validate_dataframe(prices_df, f"Datos históricos para {valid_tickers}"):
+        logger.error(f"Datos históricos no válidos para {valid_tickers}")
+        return pd.DataFrame()
+
+    logger.info(f"Datos históricos obtenidos para {valid_tickers}: {prices_df.shape}")
+    return prices_df
+
+# Nueva función para limpiar archivos CSV previos
+def clean_ticker_data_directory():
+    """Elimina todos los archivos CSV en el directorio DATA_DIR"""
+    try:
+        files = glob.glob(os.path.join(DATA_DIR, "*.csv"))
+        for file in files:
+            os.remove(file)
+            logger.info(f"🗑️ Archivo eliminado: {file}")
+    except Exception as e:
+        logger.error(f"Error al eliminar archivos en {DATA_DIR}: {str(e)}")
+
+# Función para obtener datos sectoriales (sin cambios)
+def get_etf_sector_data(ticker, max_retries=3):
+    """Obtiene datos sectoriales del ETF desde Finviz con reintentos"""
+    if not FINVIZ_API_KEY:
+        logger.warning("No se proporcionó FINVIZ_API_KEY, usando fallback")
+        return pd.DataFrame()
+
+    for attempt in range(max_retries):
+        try:
+            url = f"https://elite.finviz.com/export.ashx?v=111&f=sym_{ticker}&auth={FINVIZ_API_KEY}"
+            response = requests.get(url)
+            if response.status_code == 200:
+                df = pd.read_csv(io.StringIO(response.text))
+                logger.info(f"Datos sectoriales obtenidos para {ticker}")
+                return df
+            elif response.status_code == 429:
+                logger.warning(f"Límite de tasa alcanzado en Finviz para {ticker}, reintentando...")
+                if attempt < max_retries - 1:
+                    time.sleep(2 ** attempt + random.uniform(0, 1))
+                else:
+                    logger.error(f"Error 429 persistente para {ticker}, usando fallback")
+                    return pd.DataFrame()
+            else:
+                logger.error(f"Error al obtener datos de Finviz para {ticker}: {response.status_code}")
+                return pd.DataFrame()
+        except Exception as e:
+            logger.error(f"Excepción al obtener datos de Finviz para {ticker}: {str(e)}")
+            return pd.DataFrame()
+    return pd.DataFrame()
+
+# Calcular retornos (sin cambios)
+def calculate_returns(prices):
+    """Calcula retornos diarios"""
+    if not validate_dataframe(prices, "Precios"):
+        logger.error("No se pueden calcular retornos: precios inválidos")
+        return pd.DataFrame()
+    if len(prices) < 2:
+        logger.error("No hay suficientes datos para calcular retornos (mínimo 2 filas requeridas)")
+        return pd.DataFrame()
+    try:
+        returns = prices.pct_change().dropna(how='all')
+        if not validate_dataframe(returns, "Retornos"):
+            logger.error("Retornos calculados no válidos")
+            return pd.DataFrame()
+        logger.info(f"Retornos calculados para {list(prices.columns)} con {len(returns)} filas")
+        return returns
+    except Exception as e:
+        logger.error(f"Error al calcular retornos: {str(e)}")
+        return pd.DataFrame()
+
+# Obtener tasa libre de riesgo (sin cambios)
+def get_risk_free_rate(max_retries=3):
+    """Obtiene la tasa libre de riesgo de Cetes 28 días desde Banxico"""
+    if not BANXICO_TOKEN:
+        logger.warning("No se proporcionó BANXICO_TOKEN, usando tasa por defecto: 0.05")
+        return 0.05
+
+    for attempt in range(max_retries):
+        try:
+            url = "https://www.banxico.org.mx/SieAPIRest/service/v1/series/SF61745/datos/oportuno"
+            headers = {"Bmx-Token": BANXICO_TOKEN}
+            response = requests.get(url, headers=headers)
+            if response.status_code == 200:
+                data = response.json()
+                rate = float(data['bmx']['series'][0]['datos'][0]['dato']) / 100
+                logger.info(f"Tasa libre de riesgo obtenida: {rate}")
+                return rate
+            else:
+                logger.error(f"Error al obtener tasa de Banxico: {response.status_code}")
+                if attempt == max_retries - 1:
+                    logger.warning("Usando tasa por defecto: 0.05")
+                    return 0.05
+        except Exception as e:
+            logger.error(f"Excepción al obtener tasa de Banxico: {str(e)}")
+            if attempt == max_retries - 1:
+                logger.warning("Usando tasa por defecto: 0.05")
+                return 0.05
+        time.sleep(2 ** attempt + random.uniform(0, 1))
+    return 0.05
+
+# Optimización de portafolio (sin cambios)
+def optimize_portfolio(returns, risk_free_rate):
+    """Maximiza el ratio de Sharpe para el portafolio (Markowitz)"""
+    if not validate_dataframe(returns, "Retornos"):
+        logger.error("No se puede optimizar el portafolio: retornos inválidos")
+        return np.array([])
+
+    num_assets = len(returns.columns)
+    if num_assets == 0:
+        logger.error("No hay activos para optimizar")
+        return np.array([])
+
+    expected_returns = returns.mean() * 252
+    cov_matrix = returns.cov() * 252
+
+    def neg_sharpe_ratio(weights, expected_returns, cov_matrix, risk_free_rate):
+        portfolio_return = np.sum(expected_returns * weights)
+        portfolio_vol = np.sqrt(np.dot(weights.T, np.dot(cov_matrix, weights)))
+        return -(portfolio_return - risk_free_rate) / portfolio_vol if portfolio_vol != 0 else np.inf
+
+    constraints = (
+        {'type': 'eq', 'fun': lambda x: np.sum(x) - 1},
+        {'type': 'ineq', 'fun': lambda x: x},
+    )
+    bounds = tuple((0, 1) for _ in range(num_assets))
+    initial_guess = num_assets * [1. / num_assets]
+
+    try:
+        result = minimize(
+            neg_sharpe_ratio,
+            initial_guess,
+            args=(expected_returns, cov_matrix, risk_free_rate),
+            method='SLSQP',
+            bounds=bounds,
+            constraints=constraints
+        )
+        if result.success:
+            logger.info("Maximización de Sharpe exitosa")
+            return result.x
+        else:
+            logger.error("Maximización de Sharpe fallida: " + result.message)
+            return np.zeros(num_assets)
+    except Exception as e:
+        logger.error(f"Error en maximización de Sharpe: {str(e)}")
+        return np.zeros(num_assets)
+
+# Validar tickers con yfinance
+@st.cache_data(ttl=3600)
+def validate_tickers(tickers, max_retries=3):
+    """Valida que los tickers tengan datos disponibles usando yfinance"""
     valid_tickers = []
     for ticker in tickers:
-        try:
-            stock = yf.Ticker(ticker)
-            info = stock.info
-            if info.get("regularMarketPrice") is not None:
-                valid_tickers.append(ticker)
-                logger.info(f"Ticker {ticker} validado correctamente.")
-            else:
-                logger.warning(f"Ticker {ticker} no tiene datos válidos.")
-            time.sleep(3)
-        except Exception as e:
-            logger.warning(f"Error al validar {ticker}: {str(e)}")
-            time.sleep(3)
-    st.write(f"Tickers validados: {valid_tickers}")
-    return valid_tickers
-
-# Función para cargar datos históricos
-@st.cache_data(ttl=3600)
-def load_ticker_data(tickers, period="5y", interval="1mo"):
-    data_dict = {}
-    max_retries = 2
-    retry_delay = 10
-    alpha_vantage_requests = 0
-    alpha_vantage_limit = 5
-
-    for ticker in tickers:
-        # Intentar con Yahoo Finance
         for attempt in range(max_retries):
             try:
-                data = yf.download(ticker, period=period, interval=interval, auto_adjust=True)
-                if not data.empty and 'Close' in data:
-                    data = data['Close'].dropna()
-                    if len(data) >= 2:
-                        data_dict[ticker] = data
-                        logger.info(f"{ticker}: {data.shape} filas descargadas.")
+                ticker_obj = yf.Ticker(ticker)
+                data = ticker_obj.history(period="1d", interval="1d")
+                if data is not None and not data.empty and 'Close' in data.columns:
+                    valid_tickers.append(ticker)
+                    logger.info(f"Ticker {ticker} validado correctamente.")
+                    break
+                else:
+                    logger.warning(f"Ticker {ticker} no tiene datos válidos con 1d, intentando 1mo...")
+                    data_short = ticker_obj.history(period="1mo", interval="1d")
+                    if data_short is not None and not data_short.empty and 'Close' in data_short.columns:
+                        valid_tickers.append(ticker)
+                        logger.info(f"Ticker {ticker} validado con período corto.")
                         break
-                    else:
-                        logger.warning(f"{ticker}: Datos insuficientes ({len(data)} filas).")
-                else:
-                    logger.warning(f"{ticker}: DataFrame vacío o sin 'Close'.")
-                time.sleep(retry_delay)
             except Exception as e:
-                logger.warning(f"{ticker}: Error en yfinance - {str(e)}")
-                time.sleep(retry_delay)
+                logger.warning(f"Error al validar ticker {ticker}: {str(e)}")
+            if attempt < max_retries - 1:
+                time.sleep(2 ** attempt + random.uniform(0, 1))
+    return valid_tickers
 
-        # Intentar con Alpha Vantage
-        if ticker not in data_dict:
-            if alpha_vantage_requests >= alpha_vantage_limit:
-                logger.warning(f"Límite de Alpha Vantage alcanzado ({alpha_vantage_limit} solicitudes).")
-                continue
-            try:
-                url = f"https://www.alphavantage.co/query?function=TIME_SERIES_MONTHLY&symbol={ticker}&apikey={ALPHA_VANTAGE_API_KEY}"
-                response = requests.get(url).json()
-                alpha_vantage_requests += 1
-                if "Monthly Time Series" in response:
-                    time_series = response["Monthly Time Series"]
-                    dates = []
-                    prices = []
-                    for date, values in time_series.items():
-                        dates.append(pd.to_datetime(date))
-                        prices.append(float(values["4. close"]))
-                    data = pd.Series(prices, index=dates, name=ticker).sort_index()
-                    end_date = datetime.now()
-                    start_date = end_date - pd.Timedelta(days=5*365)
-                    data = data[(data.index >= start_date) & (data.index <= end_date)]
-                    if len(data) >= 2:
-                        data_dict[ticker] = data
-                        logger.info(f"{ticker}: {data.shape} filas desde Alpha Vantage.")
-                    else:
-                        logger.warning(f"{ticker}: Datos insuficientes desde Alpha Vantage ({len(data)} filas).")
+# Recomendar activos con Claude (sin cambios)
+def recomendar_activos_con_claude(perfil, portfolio_type="basic", currencies=["MXN", "USD", "EUR"], max_retries=3):
+    """Recomienda tickers usando Claude"""
+    available_tickers = portafolio_basico if portfolio_type == "basic" else portafolio_premier
+    tickers_string = ", ".join([f"'{t}'" for t in available_tickers])
+    currency_prompt = ", ".join([f"{c} ({'.MX' if c == 'MXN' else '.DE' if c == 'EUR' else 'sin sufijo'})" for c in currencies])
+    prompt = f"""
+    Eres un asesor financiero experto. Según el perfil de riesgo '{perfil}', recomienda 5 activos de entre los tickers disponibles: {tickers_string}.
+    Los activos deben estar listados en bolsas compatibles con las monedas: {currency_prompt}.
+    Devuelve sólo una lista de Python con los tickers, seleccionando únicamente de los proporcionados.
+    """
+    for attempt in range(max_retries):
+        try:
+            response = client_anthropic.messages.create(
+                model="claude-3-5-sonnet-20241022",
+                max_tokens=200,
+                temperature=0.7,
+                system="Eres un asesor financiero experto.",
+                messages=[{"role": "user", "content": prompt}]
+            )
+            content = response.content[0].text.strip()
+            tickers = eval(content)
+            if not isinstance(tickers, list) or len(tickers) != 5:
+                logger.warning("Respuesta de Claude no válida, usando tickers por defecto")
+                return available_tickers[:5]
+            valid_tickers = [t for t in tickers if t in available_tickers]
+            return valid_tickers[:5] if len(valid_tickers) >= 5 else available_tickers[:5]
+        except APIError as e:
+            if "429" in str(e):
+                logger.warning(f"Límite de tasa alcanzado en Anthropic, reintentando en {2 ** attempt + random.uniform(0, 1)} segundos...")
+                if attempt < max_retries - 1:
+                    time.sleep(2 ** attempt + random.uniform(0, 1))
                 else:
-                    logger.warning(f"No se encontraron datos en Alpha Vantage para {ticker}.")
-                time.sleep(12)
-            except Exception as e:
-                logger.warning(f"Error al cargar datos de Alpha Vantage para {ticker}: {str(e)}")
+                    logger.error(f"Error persistente 429 en Anthropic: {str(e)}")
+                    return available_tickers[:5]
+            else:
+                logger.error(f"Error en la solicitud a Anthropic: {str(e)}")
+                return available_tickers[:5]
+        except Exception as e:
+            logger.error(f"Error interpretando respuesta de Anthropic: {str(e)}")
+            return available_tickers[:5]
+    return available_tickers[:5]
 
-    if not data_dict:
-        logger.error("No se obtuvieron datos para ningún ticker.")
-        st.error("No se pudieron obtener datos para los tickers seleccionados. Verifica tu conexión o intenta más tarde.")
-        return pd.DataFrame()
-
-    combined_data = pd.DataFrame(data_dict)
-    return combined_data.dropna()
-
-# Función para calcular retornos
-def calculate_returns(prices):
-    if prices.empty or len(prices) < 2:
-        logger.error("DataFrame de precios vacío o con menos de 2 filas.")
-        return pd.DataFrame()
-    returns = prices.pct_change().dropna()
-    if returns.empty:
-        logger.error("No se pudieron calcular retornos: todos los valores son NaN o insuficientes.")
-    return returns
-
-# Función para clasificar activos
+# Clasificar activos (sin cambios)
 def classify_asset(ticker):
-    try:
-        url = f"https://elite.finviz.com/export.ashx?v=111&f=sym_{ticker}&auth={FINVIZ_API_KEY}"
-        response = requests.get(url)
-        if response.status_code == 200:
-            return "Acción"
-    except:
-        pass
+    """Clasifica el tipo de activo con fallback si Finviz falla"""
+    sector_data = get_etf_sector_data(ticker)
+    if sector_data.empty:
+        logger.warning(f"Fallo al clasificar {ticker} con Finviz, usando fallback")
+        return "Bono Gubernamental" if ticker.endswith('.MX') else "Fondo de Inversión"
+    return "Acción"
 
-    if ticker.endswith('.MX'):
-        return "Bono Gubernamental"
-
-    try:
-        url = f"https://www.alphavantage.co/query?function=OVERVIEW&symbol={ticker}&apikey={ALPHA_VANTAGE_API_KEY}"
-        response = requests.get(url).json()
-        if "Name" in response and "ETF" in response["Name"]:
-            return "ETF"
-        elif "Sector" in response:
-            return "Acción"
-        else:
-            return "Fondo de Inversión"
-    except:
-        return "Fondo de Inversión"
-
-# Ajustar pesos según perfil de riesgo
+# Ajustar pesos (sin cambios)
 def adjust_weights(weights, tickers, profile):
-    if len(weights) == 0 or len(tickers) == 0:
-        return []
+    """Ajusta pesos según el perfil de riesgo"""
+    if len(weights) == 0 or len(tickers) == 0 or all(w == 0 for w in weights):
+        logger.warning("Pesos o tickers inválidos, asignando pesos uniformes")
+        return np.ones(len(tickers)) / len(tickers) if len(tickers) > 0 else np.array([])
     adjusted_weights = np.array(weights)
     for i, ticker in enumerate(tickers):
         asset_type = classify_asset(ticker)
         if profile in ["Conservador", "Moderado"]:
-            if asset_type in ["Bono Gubernamental", "ETF"] and (ticker in ["BOND", "TIP", "LQD", "EMLC", "VGSH", "NEAR", "BIL"]):
+            if asset_type == "Bono Gubernamental" or ticker in ["TIP", "VGSH", "BIL", "VGIT", "AGG", "SHY", "IBGS.AS"]:
                 adjusted_weights[i] *= 1.5
             else:
                 adjusted_weights[i] *= 0.5
         elif profile == "Balanceado":
             adjusted_weights[i] *= 1.0
-        else:  # Crecimiento, Oportunidad
-            if asset_type == "Acción" or ticker in ["EWW", "SPY", "EZU"]:
+        else:
+            if asset_type == "Acción" or ticker in ["EWW", "SPY", "EZU", "IVV", "ACWI"]:
                 adjusted_weights[i] *= 1.5
             else:
                 adjusted_weights[i] *= 0.5
-    adjusted_weights = adjusted_weights / adjusted_weights.sum() if adjusted_weights.sum() != 0 else adjusted_weights
-    return adjusted_weights
+    if adjusted_weights.sum() == 0:
+        logger.warning("Suma de pesos ajustados es cero, asignando pesos uniformes")
+        return np.ones(len(tickers)) / len(tickers)
+    return adjusted_weights / adjusted_weights.sum()
+
+# Filtrar tickers por moneda (sin cambios)
+def filter_tickers_by_currency(tickers, currencies):
+    """Filtra tickers según las monedas seleccionadas"""
+    filtered = []
+    for ticker in tickers:
+        mapped_ticker = ticker_mapping.get(ticker, ticker)
+        if "USD" in currencies and not (ticker.endswith('.MX') or ticker.endswith('.DE')):
+            filtered.append(mapped_ticker)
+        elif "MXN" in currencies and ticker.endswith('.MX'):
+            filtered.append(mapped_ticker)
+        elif "EUR" in currencies and ticker.endswith('.DE'):
+            filtered.append(mapped_ticker)
+    logger.info(f"Tickers después de filtrar por monedas {currencies}: {filtered}")
+    return filtered
+
+# Asegurar tickers válidos (sin cambios)
+def ensure_valid_tickers(tickers, portfolio_type="basic"):
+    """Asegura que los tickers tengan datos históricos válidos; usa tickers de respaldo si es necesario"""
+    valid_tickers = validate_tickers(tickers)
+    if len(valid_tickers) < 3:  # Mínimo 3 tickers para un portafolio significativo
+        logger.warning(f"No hay suficientes tickers válidos ({valid_tickers}) para {portfolio_type}, usando tickers de respaldo")
+        fallback_valid = validate_tickers(fallback_tickers)
+        valid_tickers.extend(fallback_valid[:5 - len(valid_tickers)])
+        if len(valid_tickers) < 3:
+            logger.error(f"No se encontraron suficientes tickers válidos incluso con respaldo para {portfolio_type}")
+            st.error(f"No se encontraron suficientes tickers válidos para el portafolio {portfolio_type}, incluso con tickers de respaldo. Por favor, verifica tu conexión a internet o los tickers.")
+            st.stop()
+    return valid_tickers
+
+# Describir asignación (sin cambios)
+def describe_allocation(weights, tickers):
+    """Describe la asignación por tipo de activo"""
+    if len(weights) == 0 or len(tickers) == 0 or all(w == 0 for w in weights):
+        return "No se pudo calcular la asignación por tipo de activo debido a datos insuficientes."
+    asset_types = [classify_asset(ticker) for ticker in tickers]
+    df = pd.DataFrame({"Ticker": tickers, "Peso": weights, "Tipo": asset_types})
+    grouped = df.groupby("Tipo")["Peso"].sum().reset_index()
+    allocation_desc = ", ".join([f"{row['Tipo']}: {row['Peso']*100:.2f}%" for _, row in grouped.iterrows()])
+    return f"Asignación por tipo de activo: {allocation_desc}"
+
+# Sugerir cantidades de inversión (sin cambios)
+def suggest_investment_amounts(profile):
+    """Sugiere cantidades en MXN para invertir según el perfil"""
+    suggestions = {
+        "Conservador": 50000,
+        "Moderado": 100000,
+        "Balanceado": 150000,
+        "Crecimiento": 200000,
+        "Oportunidad": 300000
+    }
+    return suggestions.get(profile, 100000)
+
+# Generar resumen con Claude (sin cambios)
+def generate_summary_with_claude(profile, tickers_basic, tickers_premier, scores_basic, scores_premier, max_retries=3):
+    """Genera un resumen con la API de Anthropic (Claude)."""
+    if scores_basic.empty or scores_premier.empty:
+        logger.warning("Métricas vacías, usando resumen genérico")
+        return f"""
+        Tu perfil de riesgo es {profile} (puntaje: {total_score}). 
+        **Portafolio Básico**: Incluye {', '.join([ticker_to_name.get(t, t) for t in tickers_basic])}. 
+        Estos activos fueron seleccionados por su {'estabilidad y menor riesgo' if profile in ['Conservador', 'Moderado'] else 'equilibrio entre riesgo y retorno' if profile == 'Balanceado' else 'potencial de crecimiento'}.
+        **Portafolio Premier**: Incluye {', '.join([ticker_to_name.get(t, t) for t in tickers_premier])}. 
+        Este portafolio busca {'mayor seguridad' if profile in ['Conservador', 'Moderado'] else 'crecimiento moderado' if profile == 'Balanceado' else 'alto crecimiento con mayor riesgo'}.
+        """
+
+    prompt = f"""
+    Eres Claude, un asesor financiero experto creado por Anthropic. Explica por qué los siguientes tickers fueron seleccionados para un inversionista con perfil de riesgo '{profile}' (puntaje: {total_score}):
+    - Portafolio Básico: {', '.join([ticker_to_name.get(t, t) for t in tickers_basic])}.
+    - Portafolio Premier: {', '.join([ticker_to_name.get(t, t) for t in tickers_premier])}.
+    Basándote en las métricas de evaluación:
+    - Portafolio Básico: {scores_basic.to_dict(orient='records')}.
+    - Portafolio Premier: {scores_premier.to_dict(orient='records')}.
+    Proporciona un resumen claro y conciso en 3-4 oraciones por portafolio, explicando cómo los tickers se alinean con el perfil de riesgo.
+    """
+    for attempt in range(max_retries):
+        try:
+            response = client_anthropic.messages.create(
+                model="claude-3-5-sonnet-20241022",
+                max_tokens=500,
+                temperature=0.7,
+                system="Eres Claude, un asesor financiero experto creado por Anthropic.",
+                messages=[{"role": "user", "content": prompt}]
+            )
+            summary = response.content[0].text.strip()
+            logger.info("Resumen generado exitosamente con Claude")
+            return summary
+        except APIError as e:
+            if "429" in str(e):
+                logger.warning(f"Límite de tasa alcanzado en Anthropic, reintentando en {2 ** attempt + random.uniform(0, 1)} segundos...")
+                if attempt < max_retries - 1:
+                    time.sleep(2 ** attempt + random.uniform(0, 1))
+                else:
+                    logger.error(f"Error persistente 429 en Anthropic: {str(e)}")
+                    return f"""
+                    Tu perfil de riesgo es {profile} (puntaje: {total_score}). 
+                    **Portafolio Básico**: Incluye {', '.join([ticker_to_name.get(t, t) for t in tickers_basic])}. 
+                    **Portafolio Premier**: Incluye {', '.join([ticker_to_name.get(t, t) for t in tickers_premier])}.
+                    No se pudo generar un resumen detallado debido a problemas con la API.
+                    """
+            else:
+                logger.error(f"Error en la solicitud a Anthropic: {str(e)}")
+                return f"""
+                Tu perfil de riesgo es {profile} (puntaje: {total_score}). 
+                **Portafolio Básico**: Incluye {', '.join([ticker_to_name.get(t, t) for t in tickers_basic])}. 
+                **Portafolio Premier**: Incluye {', '.join([ticker_to_name.get(t, t) for t in tickers_premier])}.
+                No se pudo generar un resumen detallado debido a problemas con la API.
+                """
+        except Exception as e:
+            logger.error(f"Error interpretando respuesta de Anthropic: {str(e)}")
+            return f"""
+            Tu perfil de riesgo es {profile} (puntaje: {total_score}). 
+            **Portafolio Básico**: Incluye {', '.join([ticker_to_name.get(t, t) for t in tickers_basic])}. 
+            **Portafolio Premier**: Incluye {', '.join([ticker_to_name.get(t, t) for t in tickers_premier])}.
+            No se pudo generar un resumen detallado debido a problemas con la API.
+            """
+    return f"""
+    Tu perfil de riesgo es {profile} (puntaje: {total_score}). 
+    **Portafolio Básico**: Incluye {', '.join([ticker_to_name.get(t, t) for t in tickers_basic])}. 
+    **Portafolio Premier**: Incluye {', '.join([ticker_to_name.get(t, t) for t in tickers_premier])}.
+    No se pudo generar un resumen detallado debido a problemas con la API.
+    """
 
 # Botón para calcular portafolios
 if st.button("Calcular Portafolios"):
-    with st.spinner("Obteniendo recomendaciones de Claude..."):
-        # Obtener tickers recomendados por Claude
+    st.info("El proceso para cargar tus portafolios puede tardar un momento. Por favor, espera...")
+
+    # Prueba de conexión inicial
+    test_ticker = "SPY"
+    test_data = None
+    for attempt in range(3):
+        try:
+            test_data = yf.Ticker(test_ticker).history(period="1mo", interval="1d")
+            break
+        except Exception as e:
+            logger.error(f"Error al probar conexión con yfinance (intento {attempt + 1}/3): {str(e)}")
+            if attempt < 2:
+                time.sleep(2 ** attempt + random.uniform(0, 1))
+    if test_data is None or test_data.empty or 'Close' not in test_data.columns:
+        st.error("No se puede conectar a yfinance. Verifica tu conexión a internet o intenta más tarde.")
+        st.stop()
+
+    # Limpiar directorio de datos antes de nuevas recomendaciones
+    with st.spinner("Limpiando datos previos..."):
+        clean_ticker_data_directory()
+
+    with st.spinner("Obteniendo recomendaciones de Claude y descargando datos..."):
+        # Obtener recomendaciones
         tickers_basic = recomendar_activos_con_claude(profile, "basic", currency)
         tickers_premier = recomendar_activos_con_claude(profile, "premier", currency)
 
         # Validar tickers
-        tickers_basic = validate_tickers(tickers_basic)
-        tickers_premier = validate_tickers(tickers_premier)
+        combined_tickers = list(set(tickers_basic + tickers_premier + [test_ticker]))
+        valid_tickers = validate_tickers(combined_tickers)
+        tickers_basic = [t for t in tickers_basic if t in valid_tickers]
+        tickers_premier = [t for t in tickers_premier if t in valid_tickers]
 
-        # Filtrar tickers según moneda seleccionada
-        def filter_tickers_by_currency(tickers, currencies):
-            filtered = []
-            mxn_tickers = []
-            usd_tickers = ["BOND", "EWW", "TIP", "LQD", "EMLC", "VGSH", "NEAR", "BIL", "SPY"]
-            eur_tickers = ["EZU"]
-            for ticker in tickers:
-                mapped_ticker = ticker_mapping.get(ticker, ticker)
-                if "MXN" in currencies and (ticker.endswith('.MX') or ticker in mxn_tickers):
-                    filtered.append(mapped_ticker)
-                elif "USD" in currencies and (not ticker.endswith('.MX') and not ticker.endswith('.DE') or ticker in usd_tickers):
-                    filtered.append(mapped_ticker)
-                elif "EUR" in currencies and (ticker.endswith('.DE') or ticker in eur_tickers):
-                    filtered.append(mapped_ticker)
-            return filtered
-
+        # Filtrar por moneda
         filtered_tickers_basic = filter_tickers_by_currency(tickers_basic, currency)
         filtered_tickers_premier = filter_tickers_by_currency(tickers_premier, currency)
 
         # Fallback a tickers predeterminados
         if not filtered_tickers_basic:
-            default_basic = ["BOND", "EWW", "TIP", "LQD", "EMLC", "VGSH", "NEAR", "SPY"]
-            default_basic_mapped = [ticker_mapping.get(t, t) for t in default_basic]
-            filtered_tickers_basic = filter_tickers_by_currency(validate_tickers(default_basic_mapped), currency)
+            default_basic = [t for t in portafolio_basico if t in validate_tickers(portafolio_basico)]
+            filtered_tickers_basic = filter_tickers_by_currency(default_basic, currency)
         if not filtered_tickers_premier:
-            default_premier = ["BIL", "EWW", "LQD", "VGSH", "NEAR", "SPY", "EZU"]
-            default_premier_mapped = [ticker_mapping.get(t, t) for t in default_premier]
-            filtered_tickers_premier = filter_tickers_by_currency(validate_tickers(default_premier_mapped), currency)
+            default_premier = [t for t in portafolio_premier if t in validate_tickers(portafolio_premier)]
+            filtered_tickers_premier = filter_tickers_by_currency(default_premier, currency)
+
+        # Asegurar que los tickers tengan datos históricos válidos
+        filtered_tickers_basic = ensure_valid_tickers(filtered_tickers_basic, "basic")
+        filtered_tickers_premier = ensure_valid_tickers(filtered_tickers_premier, "premier")
+
+        # Descargar datos para los tickers y el benchmark
+        for ticker in set(filtered_tickers_basic + filtered_tickers_premier + [test_ticker]):
+            download_and_save_ticker_data(ticker, period="5y")
 
         st.write("Tickers Básicos Filtrados:", filtered_tickers_basic)
         st.write("Tickers Premier Filtrados:", filtered_tickers_premier)
 
-        if not filtered_tickers_basic or not filtered_tickers_premier:
-            st.error("No se encontraron tickers válidos para las monedas seleccionadas. Posibles causas: "
-                     "1) Claude no devolvió tickers compatibles, 2) Yahoo Finance/Alpha Vantage no tienen datos, "
-                     "3) Límite de tasa alcanzado. Intenta de nuevo más tarde o usa solo USD.")
+        # Obtener datos históricos desde los archivos CSV
+        benchmark_ticker = "SPY"
+        with st.spinner("Leyendo datos históricos desde archivos CSV..."):
+            prices_basic = fetch_historical_data(filtered_tickers_basic)
+            prices_premier = fetch_historical_data(filtered_tickers_premier)
+            prices_benchmark = fetch_historical_data([benchmark_ticker])
+
+        # Depuración adicional
+        if prices_basic.empty or prices_premier.empty:
+            logger.warning(f"Datos vacíos - Básico: {len(prices_basic)}, Premier: {len(prices_premier)}")
+            st.warning("Datos insuficientes detectados. Se intentarán tickers de respaldo.")
+
+        # Calcular retornos
+        returns_basic = calculate_returns(prices_basic)
+        returns_premier = calculate_returns(prices_premier)
+
+        # Definir weights_criteria
+        weights_criteria = {
+            "Conservador": {"Rentabilidad": 0.2, "Riesgo": 0.5, "Diversificación": 0.1, "Liquidez": 0.1, "Alineación": 0.1},
+            "Moderado": {"Rentabilidad": 0.3, "Riesgo": 0.3, "Diversificación": 0.2, "Liquidez": 0.1, "Alineación": 0.1},
+            "Balanceado": {"Rentabilidad": 0.35, "Riesgo": 0.25, "Diversificación": 0.2, "Liquidez": 0.1, "Alineación": 0.1},
+            "Crecimiento": {"Rentabilidad": 0.4, "Riesgo": 0.2, "Diversificación": 0.2, "Liquidez": 0.1, "Alineación": 0.1},
+            "Oportunidad": {"Rentabilidad": 0.45, "Riesgo": 0.15, "Diversificación": 0.2, "Liquidez": 0.1, "Alineación": 0.1}
+        }[profile]
+
+        if returns_basic.empty or returns_premier.empty:
+            st.error("No se pudieron calcular los retornos debido a datos insuficientes. Revisa los logs para más detalles.")
+            weights_basic = np.ones(len(filtered_tickers_basic)) / len(filtered_tickers_basic) if len(filtered_tickers_basic) > 0 else np.array([])
+            weights_premier = np.ones(len(filtered_tickers_premier)) / len(filtered_tickers_premier) if len(filtered_tickers_premier) > 0 else np.array([])
+            scores_basic = pd.DataFrame()
+            scores_premier = pd.DataFrame()
         else:
-            # Obtener datos históricos
-            prices_basic = load_ticker_data(filtered_tickers_basic)
-            returns_basic = calculate_returns(prices_basic)
+            risk_free_rate = get_risk_free_rate()
+            weights_basic = optimize_portfolio(returns_basic, risk_free_rate)
+            weights_premier = optimize_portfolio(returns_premier, risk_free_rate)
+            weights_basic = adjust_weights(weights_basic, filtered_tickers_basic, profile)
+            weights_premier = adjust_weights(weights_premier, filtered_tickers_premier, profile)
 
-            prices_premier = load_ticker_data(filtered_tickers_premier)
-            returns_premier = calculate_returns(prices_premier)
-
-            if returns_basic.empty or returns_premier.empty:
-                st.error("No se pudieron calcular los retornos debido a datos insuficientes. "
-                         "Verifica los logs para detalles o intenta con menos tickers.")
-                weights_basic = np.zeros(len(filtered_tickers_basic))
-                weights_premier = np.zeros(len(filtered_tickers_premier))
-                scores_basic = pd.DataFrame()
-                scores_premier = pd.DataFrame()
-            else:
-                risk_free_rate = get_risk_free_rate()
-
-                # Optimizar portafolios
-                try:
-                    weights_basic = optimize_portfolio(returns_basic, risk_free_rate)
-                    if len(weights_basic) == 0:
-                        logger.error("No se pudieron optimizar los pesos del portafolio Básico.")
-                        weights_basic = np.zeros(len(filtered_tickers_basic))
-                except Exception as e:
-                    logger.error(f"Error al optimizar el portafolio Básico: {str(e)}")
-                    weights_basic = np.zeros(len(filtered_tickers_basic))
-
-                try:
-                    weights_premier = sharpe_ratio_maximization(returns_premier, risk_free_rate)
-                    if len(weights_premier) == 0:
-                        logger.error("No se pudieron optimizar los pesos del portafolio Premier.")
-                        weights_premier = np.zeros(len(filtered_tickers_premier))
-                except Exception as e:
-                    logger.error(f"Error al optimizar el portafolio Premier: {str(e)}")
-                    weights_premier = np.zeros(len(filtered_tickers_premier))
-
-                # Ajustar pesos según perfil
-                weights_basic = adjust_weights(weights_basic, filtered_tickers_basic, profile)
-                weights_premier = adjust_weights(weights_premier, filtered_tickers_premier, profile)
-
-                # Calcular métricas para "Comparativo Criterios"
-                def calculate_criteria_scores(tickers, weights, prices):
-                    scores = []
-                    for ticker, weight in zip(tickers, weights):
-                        if ticker not in prices.columns:
-                            logger.warning(f"Datos no disponibles para {ticker}")
-                            continue
-                        data = prices[ticker]
-                        if data.empty or len(data) < 2:
-                            logger.warning(f"Datos insuficientes para {ticker}")
-                            continue
-                        initial_price = data.iloc[0]
-                        final_price = data.iloc[-1]
-                        num_years = 5
-                        cagr = ((final_price / initial_price) ** (1 / num_years) - 1) * 100 if initial_price > 0 else 0
-                        rentabilidad = min(max((cagr + 10) / 2, 1), 10)
-                        returns = data.pct_change().dropna()
-                        vol = np.std(returns) * np.sqrt(252) * 100 if len(returns) > 0 else 0
-                        riesgo = min(max((15 - vol) / 1.5, 1), 10)
-                        asset_type = classify_asset(ticker)
-                        diversificacion = 8 if asset_type == "ETF" else 5
-                        stock = yf.Ticker(ticker)
-                        info = stock.info
-                        volume = info.get("averageVolume", 0)
-                        liquidez = min(max(volume // 1000000, 1), 10)
-                        alineacion = 8 if (profile in ["Conservador", "Moderado"] and asset_type == "Bono Gubernamental") or \
-                                        (profile == "Balanceado" and asset_type in ["ETF", "Acción"]) or \
-                                        (profile in ["Crecimiento", "Oportunidad"] and asset_type == "Acción") else 5
-                        scores.append({
-                            "Ticker": ticker_to_name.get(ticker, ticker),
-                            "Rentabilidad": rentabilidad,
-                            "Riesgo": riesgo,
-                            "Diversificación": diversificacion,
-                            "Liquidez": liquidez,
-                            "Alineación": alineacion
-                        })
-                    return pd.DataFrame(scores) if scores else pd.DataFrame()
-
-                weights_criteria = {
-                    "Conservador": {"Rentabilidad": 0.2, "Riesgo": 0.5, "Diversificación": 0.1, "Liquidez": 0.1, "Alineación": 0.1},
-                    "Moderado": {"Rentabilidad": 0.3, "Riesgo": 0.3, "Diversificación": 0.2, "Liquidez": 0.1, "Alineación": 0.1},
-                    "Balanceado": {"Rentabilidad": 0.35, "Riesgo": 0.25, "Diversificación": 0.2, "Liquidez": 0.1, "Alineación": 0.1},
-                    "Crecimiento": {"Rentabilidad": 0.4, "Riesgo": 0.2, "Diversificación": 0.2, "Liquidez": 0.1, "Alineación": 0.1},
-                    "Oportunidad": {"Rentabilidad": 0.45, "Riesgo": 0.15, "Diversificación": 0.2, "Liquidez": 0.1, "Alineación": 0.1}
-                }[profile]
-
-                scores_basic = calculate_criteria_scores(filtered_tickers_basic, weights_basic, prices_basic)
-                scores_premier = calculate_criteria_scores(filtered_tickers_premier, weights_premier, prices_premier)
-
-                for df in [scores_basic, scores_premier]:
-                    if not df.empty:
-                        df["Puntuación Total"] = sum(df[crit] * weight for crit, weight in weights_criteria.items())
-
-            # Gráficos de pastel
-            def plot_pie_chart(weights, tickers):
-                if len(weights) == 0 or len(tickers) == 0:
-                    return px.pie(names=["Sin Datos"], values=[1], title="Asignación por Tipo de Activo")
-                asset_types = [classify_asset(ticker) for ticker in tickers]
-                df = pd.DataFrame({"Ticker": tickers, "Peso": weights, "Tipo": asset_types})
-                grouped = df.groupby("Tipo")["Peso"].sum().reset_index()
-                fig = px.pie(grouped, values="Peso", names="Tipo", title="Asignación por Tipo de Activo")
-                fig.update_traces(marker=dict(colors=[f"rgb({r},{g},{b})" for r, g, b in [
-                    (128, 179, 135), (0, 55, 129), (255, 255, 255), (201, 202, 204), (107, 149, 177)
-                ]]))
-                return fig
-
-            fig_pie_basic = plot_pie_chart(weights_basic, filtered_tickers_basic)
-            fig_pie_premier = plot_pie_chart(weights_premier, filtered_tickers_premier)
-
-            # Gráfico de líneas
-            def plot_historical_performance(prices, tickers, weights, benchmark_ticker):
-                if prices.empty or len(weights) == 0:
-                    return None
-                portfolio_value = (prices * weights).sum(axis=1)
-                benchmark = load_ticker_data([benchmark_ticker])
-                if benchmark_ticker in benchmark.columns:
-                    benchmark = benchmark[benchmark_ticker]
-                    benchmark = benchmark.reindex(portfolio_value.index, method="ffill")
-                    df = pd.DataFrame({
-                        "Portafolio": portfolio_value / portfolio_value.iloc[0] * 100,
-                        "Benchmark": benchmark / benchmark.iloc[0] * 100
+            def calculate_criteria_scores(tickers, weights, prices):
+                scores = []
+                for ticker, weight in zip(tickers, weights):
+                    if ticker not in prices.columns or weight == 0:
+                        continue
+                    data = prices[ticker].dropna()
+                    if len(data) < 2:
+                        logger.warning(f"Datos insuficientes para {ticker}")
+                        continue
+                    initial_price = data.iloc[0]
+                    final_price = data.iloc[-1]
+                    num_years = min(5, len(data) / 252)  # Ajustado a 5 años
+                    cagr = ((final_price / initial_price) ** (1 / num_years) - 1) * 100 if initial_price > 0 else 0
+                    rentabilidad = min(max((cagr + 10) / 2, 1), 10) if not np.isnan(cagr) else 1.0
+                    returns = data.pct_change().dropna()
+                    vol = np.std(returns) * np.sqrt(252) * 100 if len(returns) > 0 else 0
+                    riesgo = min(max((15 - vol) / 1.5, 1), 10) if not np.isnan(vol) else 8.0
+                    asset_type = classify_asset(ticker)
+                    diversificacion = 8 if asset_type == "Fondo de Inversión" else 5
+                    liquidez = 5
+                    alineacion = 8 if (profile in ["Conservador", "Moderado"] and asset_type == "Bono Gubernamental") or \
+                                     (profile == "Balanceado" and asset_type in ["Fondo de Inversión", "Acción"]) or \
+                                     (profile in ["Crecimiento", "Oportunidad"] and asset_type == "Acción") else 5
+                    scores.append({
+                        "Ticker": ticker_to_name.get(ticker, ticker),
+                        "Rentabilidad": rentabilidad,
+                        "Riesgo": riesgo,
+                        "Diversificación": diversificacion,
+                        "Liquidez": liquidez,
+                        "Alineación": alineacion
                     })
-                    fig = go.Figure()
-                    fig.add_trace(go.Scatter(x=df.index, y=df["Portafolio"], name="Portafolio"))
-                    fig.add_trace(go.Scatter(x=df.index, y=df["Benchmark"], name=benchmark_ticker))
-                    fig.update_layout(
-                        title="Rendimiento Histórico (5 años)",
-                        yaxis_title="Valor Normalizado (%)",
-                        template="plotly_white",
-                        height=400,
-                        plot_bgcolor="rgb(255,255,255)",
-                        paper_bgcolor="rgb(255,255,255)"
-                    )
-                    return fig
-                return None
+                return pd.DataFrame(scores)
 
-            benchmark = "IPC.MX" if "MXN" in currency else "SPY"
-            fig_line_basic = plot_historical_performance(prices_basic, filtered_tickers_basic, weights_basic, benchmark)
-            fig_line_premier = plot_historical_performance(prices_premier, filtered_tickers_premier, weights_premier, benchmark)
+            scores_basic = calculate_criteria_scores(filtered_tickers_basic, weights_basic, prices_basic)
+            scores_premier = calculate_criteria_scores(filtered_tickers_premier, weights_premier, prices_premier)
 
-            # Almacenar datos para el reporte
-            st.session_state['report_data'] = {
-                'profile': profile,
-                'score': total_score,
-                'tickers_basic': filtered_tickers_basic,
-                'tickers_premier': filtered_tickers_premier,
-                'prices_basic': prices_basic,
-                'prices_premier': prices_premier,
-                'returns_basic': returns_basic,
-                'returns_premier': returns_premier,
-                'weights_basic': weights_basic,
-                'weights_premier': weights_premier,
-                'scores_basic': scores_basic,
-                'scores_premier': scores_premier,
-                'fig_pie_basic': fig_pie_basic,
-                'fig_pie_premier': fig_pie_premier,
-                'fig_line_basic': fig_line_basic,
-                'fig_line_premier': fig_line_premier
-            }
+            for df in [scores_basic, scores_premier]:
+                if not df.empty:
+                    df["Puntuación Total"] = sum(df[crit] * weight for crit, weight in weights_criteria.items())
 
-            # Mostrar resultados
-            st.subheader("Portafolio Básico")
-            st.write({ticker_to_name.get(t, t): w for t, w in zip(filtered_tickers_basic, weights_basic)})
-            st.plotly_chart(fig_pie_basic)
-            if fig_line_basic:
-                st.plotly_chart(fig_line_basic)
+        # Gráficos usando visuals.py
+        allocation_desc_basic = describe_allocation(weights_basic, filtered_tickers_basic)
+        allocation_desc_premier = describe_allocation(weights_premier, filtered_tickers_premier)
 
-            st.subheader("Portafolio Premier")
-            st.write({ticker_to_name.get(t, t): w for t, w in zip(filtered_tickers_premier, weights_premier)})
-            st.plotly_chart(fig_pie_premier)
-            if fig_line_premier:
-                st.plotly_chart(fig_line_premier)
+        fig_pie_basic = visuals.plot_pie_chart(weights_basic, [ticker_to_name.get(t, t) for t in filtered_tickers_basic])
+        fig_pie_premier = visuals.plot_pie_chart(weights_premier, [ticker_to_name.get(t, t) for t in filtered_tickers_premier])
+        fig_line_basic = visuals.plot_historical_performance(prices_basic, weights_basic, prices_benchmark, benchmark_ticker)
+        fig_line_premier = visuals.plot_historical_performance(prices_premier, weights_premier, prices_benchmark, benchmark_ticker)
 
-            # Resumen con Grok
-            prompt = f"""
-            Explica en términos sencillos el perfil de riesgo del usuario basado en su puntaje {total_score}.
-            Usa un lenguaje fácil de entender, como si hablaras con alguien que no sabe de finanzas.
-            Evita palabras técnicas. Resume los portafolios Básico y Premier, explicando cómo se dividen las inversiones
-            y por qué se ajustan al perfil del usuario ({profile}).
-            """
-            try:
-                headers = {"Authorization": f"Bearer {GROK_API_KEY}"}
-                response = requests.post("https://api.x.ai/v1/grok", json={"prompt": prompt}, headers=headers)
-                summary = response.json().get("text", "No se pudo generar el resumen.")
-            except:
-                summary = "No se pudo generar el resumen debido a un error en la API de Grok."
-                logger.error("Error en la API de Grok.")
+        # Almacenar datos para el reporte
+        st.session_state['report_data'] = {
+            'profile': profile,
+            'score': total_score,
+            'tickers_basic': filtered_tickers_basic,
+            'tickers_premier': filtered_tickers_premier,
+            'prices_basic': prices_basic,
+            'prices_premier': prices_premier,
+            'returns_basic': returns_basic,
+            'returns_premier': returns_premier,
+            'weights_basic': weights_basic,
+            'weights_premier': weights_premier,
+            'scores_basic': scores_basic,
+            'scores_premier': scores_premier,
+            'allocation_desc_basic': allocation_desc_basic,
+            'allocation_desc_premier': allocation_desc_premier,
+            'weights_criteria': weights_criteria
+        }
 
+        # Generar resumen con Claude
+        with st.spinner("Generando resumen con Claude..."):
+            summary = generate_summary_with_claude(profile, filtered_tickers_basic, filtered_tickers_premier, scores_basic, scores_premier)
             st.session_state['report_data']['summary'] = summary
-            st.subheader("Resumen de Resultados")
-            st.write(summary)
 
-            # Generar PDF
-            def generate_pdf_report():
-                pdf_buffer = io.BytesIO()
-                doc = SimpleDocTemplate(pdf_buffer, pagesize=letter)
-                styles = getSampleStyleSheet()
-                elements = []
+        # Mostrar resultados
+        st.subheader("Portafolio Básico")
+        st.write({ticker_to_name.get(t, t): f"{w*100:.2f}%" for t, w in zip(filtered_tickers_basic, weights_basic)})
+        st.plotly_chart(fig_pie_basic, key="pie_chart_basic")
+        st.plotly_chart(fig_line_basic, key="line_chart_basic")
 
+        st.subheader("Portafolio Premier")
+        st.write({ticker_to_name.get(t, t): f"{w*100:.2f}%" for t, w in zip(filtered_tickers_premier, weights_premier)})
+        st.plotly_chart(fig_pie_premier, key="pie_chart_premier")
+        st.plotly_chart(fig_line_premier, key="line_chart_premier")
+
+        # Resumen
+        st.subheader("Resumen de Resultados")
+        st.write(summary)
+
+        # Generar y ofrecer descarga del PDF (sin cambios)
+        def generate_pdf_report(report_data, risk_tolerance, investment_horizon, financial_objective,
+                               financial_situation, market_knowledge, liquidity_need, age):
+            pdf_buffer = io.BytesIO()
+            doc = SimpleDocTemplate(pdf_buffer, pagesize=letter)
+            styles = getSampleStyleSheet()
+            elements = []
+
+            profile = report_data.get('profile')
+            total_score = report_data.get('score')
+            tickers_basic = report_data.get('tickers_basic', [])
+            tickers_premier = report_data.get('tickers_premier', [])
+            weights_basic = report_data.get('weights_basic', [])
+            weights_premier = report_data.get('weights_premier', [])
+            scores_basic = report_data.get('scores_basic', pd.DataFrame())
+            scores_premier = report_data.get('scores_premier', pd.DataFrame())
+            allocation_desc_basic = report_data.get('allocation_desc_basic', "No disponible")
+            allocation_desc_premier = report_data.get('allocation_desc_premier', "No disponible")
+            summary = report_data.get('summary', '')
+            weights_criteria = report_data.get('weights_criteria', {})
+
+            try:
                 elements.append(Image("LogoAllianz.jpeg", width=100, height=50))
-                elements.append(Spacer(1, 12))
+            except Exception as e:
+                logger.warning(f"No se pudo añadir el logo 'LogoAllianz.jpeg' al PDF: {str(e)}. Continuando sin logo.")
+            elements.append(Spacer(1, 12))
+            elements.append(Paragraph("Reporte de Perfil de Riesgo y Portafolios", styles['Heading1']))
+            elements.append(Paragraph(f"Perfil de Riesgo: {profile} (Puntaje: {total_score})", styles['Heading2']))
+            elements.append(Spacer(1, 12))
 
-                elements.append(Paragraph("Reporte de Perfil de Riesgo y Portafolios", styles['Heading1']))
-                elements.append(Spacer(1, 12))
+            questionnaire_data = [
+                ["Pregunta", "Respuesta"],
+                ["Tolerancia al riesgo", risk_tolerance],
+                ["Horizonte de inversión", investment_horizon],
+                ["Objetivo financiero", financial_objective],
+                ["Situación financiera", financial_situation],
+                ["Conocimiento del mercado", market_knowledge],
+                ["Necesidad de liquidez", liquidity_need],
+                ["Edad", age]
+            ]
+            questionnaire_table = Table(questionnaire_data, colWidths=[200, 200])
+            questionnaire_table.setStyle([
+                ('BACKGROUND', (0, 0), (-1, 0), colors.Color(0, 55/255, 129/255)),
+                ('TEXTCOLOR', (0, 0), (-1, 0), colors.white),
+                ('GRID', (0, 0), (-1, -1), 1, colors.black)
+            ])
+            elements.append(questionnaire_table)
+            elements.append(Spacer(1, 12))
 
-                elements.append(Paragraph(f"Perfil de Riesgo: {profile} (Puntaje: {total_score})", styles['Heading2']))
-                elements.append(Spacer(1, 12))
+            suggested_amount = suggest_investment_amounts(profile)
+            elements.append(Paragraph(f"Cantidad sugerida para invertir: {suggested_amount:,.2f} MXN", styles['Heading3']))
+            elements.append(Spacer(1, 12))
 
-                elements.append(Paragraph("Respuestas del Cuestionario:", styles['Heading3']))
-                questionnaire_data = [
-                    ["Pregunta", "Respuesta"],
-                    ["Tolerancia al riesgo", risk_tolerance],
-                    ["Horizonte de inversión", investment_horizon],
-                    ["Objetivo financiero", financial_objective],
-                    ["Situación financiera", financial_situation],
-                    ["Conocimiento del mercado", market_knowledge],
-                    ["Necesidad de liquidez", liquidity_need],
-                    ["Edad", age]
-                ]
-                questionnaire_table = Table(questionnaire_data, colWidths=[200, 200])
-                questionnaire_table.setStyle([
-                    ('BACKGROUND', (0, 0), (-1, 0), colors.Color(0, 55/255, 129/255)),
-                    ('TEXTCOLOR', (0, 0), (-1, 0), colors.white),
-                    ('GRID', (0, 0), (-1, -1), 1, colors.black)
-                ])
-                elements.append(questionnaire_table)
-                elements.append(Spacer(1, 12))
+            elements.append(Paragraph("Portafolio Básico", styles['Heading2']))
+            basic_data = [["Ticker", "Nombre", "Peso (%)", "Monto (MXN)"]] + [
+                [ticker, ticker_to_name.get(ticker, ticker), f"{weight*100:.2f}", f"{weight * suggested_amount:,.2f}"]
+                for ticker, weight in zip(tickers_basic, weights_basic)
+            ]
+            basic_table = Table(basic_data, colWidths=[100, 200, 100, 100])
+            basic_table.setStyle([
+                ('BACKGROUND', (0, 0), (-1, 0), colors.Color(128/255, 179/255, 135/255)),
+                ('GRID', (0, 0), (-1, -1), 1, colors.black)
+            ])
+            elements.append(basic_table)
+            elements.append(Spacer(1, 12))
 
-                elements.append(Paragraph("Portafolio Básico", styles['Heading2']))
-                basic_data = [["Ticker", "Nombre", "Peso (%)"]] + [
-                    [ticker, ticker_to_name.get(ticker, ticker), f"{weight*100:.2f}"]
-                    for ticker, weight in zip(filtered_tickers_basic, weights_basic)
-                ]
-                basic_table = Table(basic_data, colWidths=[100, 200, 100])
-                basic_table.setStyle([
-                    ('BACKGROUND', (0, 0), (-1, 0), colors.Color(128/255, 179/255, 135/255)),
-                    ('GRID', (0, 0), (-1, -1), 1, colors.black)
-                ])
-                elements.append(basic_table)
-                elements.append(Spacer(1, 12))
+            elements.append(Paragraph("Asignación por Tipo de Activo - Portafolio Básico", styles['Heading3']))
+            elements.append(Paragraph(allocation_desc_basic, styles['BodyText']))
+            elements.append(Spacer(1, 12))
 
-                elements.append(Paragraph("Comparativo Criterios - Portafolio Básico", styles['Heading3']))
+            elements.append(Paragraph("Comparativo Criterios - Portafolio Básico", styles['Heading3']))
+            if not scores_basic.empty:
                 scores_basic_data = [["Ticker"] + list(weights_criteria.keys()) + ["Puntuación Total"]]
                 for _, row in scores_basic.iterrows():
                     scores_basic_data.append([
@@ -606,31 +906,31 @@ if st.button("Calcular Portafolios"):
                     ('GRID', (0, 0), (-1, -1), 1, colors.black)
                 ])
                 elements.append(scores_basic_table)
-                elements.append(Spacer(1, 12))
+            else:
+                elements.append(Paragraph("No hay datos de criterios disponibles para el Portafolio Básico.", styles['BodyText']))
+            elements.append(Spacer(1, 12))
 
-                pie_basic_img = io.BytesIO()
-                fig_pie_basic.write_image(pie_basic_img, format='png')
-                elements.append(Image(pie_basic_img, width=300, height=200))
-                if fig_line_basic:
-                    line_basic_img = io.BytesIO()
-                    fig_line_basic.write_image(line_basic_img, format='png')
-                    elements.append(Image(line_basic_img, width=300, height=200))
-                elements.append(PageBreak())
+            elements.append(PageBreak())
 
-                elements.append(Paragraph("Portafolio Premier", styles['Heading2']))
-                premier_data = [["Ticker", "Nombre", "Peso (%)"]] + [
-                    [ticker, ticker_to_name.get(ticker, ticker), f"{weight*100:.2f}"]
-                    for ticker, weight in zip(filtered_tickers_premier, weights_premier)
-                ]
-                premier_table = Table(premier_data, colWidths=[100, 200, 100])
-                premier_table.setStyle([
-                    ('BACKGROUND', (0, 0), (-1, 0), colors.Color(128/255, 179/255, 135/255)),
-                    ('GRID', (0, 0), (-1, -1), 1, colors.black)
-                ])
-                elements.append(premier_table)
-                elements.append(Spacer(1, 12))
+            elements.append(Paragraph("Portafolio Premier", styles['Heading2']))
+            premier_data = [["Ticker", "Nombre", "Peso (%)", "Monto (MXN)"]] + [
+                [ticker, ticker_to_name.get(ticker, ticker), f"{weight*100:.2f}", f"{weight * suggested_amount:,.2f}"]
+                for ticker, weight in zip(tickers_premier, weights_premier)
+            ]
+            premier_table = Table(premier_data, colWidths=[100, 200, 100, 100])
+            premier_table.setStyle([
+                ('BACKGROUND', (0, 0), (-1, 0), colors.Color(128/255, 179/255, 135/255)),
+                ('GRID', (0, 0), (-1, -1), 1, colors.black)
+            ])
+            elements.append(premier_table)
+            elements.append(Spacer(1, 12))
 
-                elements.append(Paragraph("Comparativo Criterios - Portafolio Premier", styles['Heading3']))
+            elements.append(Paragraph("Asignación por Tipo de Activo - Portafolio Premier", styles['Heading3']))
+            elements.append(Paragraph(allocation_desc_premier, styles['BodyText']))
+            elements.append(Spacer(1, 12))
+
+            elements.append(Paragraph("Comparativo Criterios - Portafolio Premier", styles['Heading3']))
+            if not scores_premier.empty:
                 scores_premier_data = [["Ticker"] + list(weights_criteria.keys()) + ["Puntuación Total"]]
                 for _, row in scores_premier.iterrows():
                     scores_premier_data.append([
@@ -648,26 +948,37 @@ if st.button("Calcular Portafolios"):
                     ('GRID', (0, 0), (-1, -1), 1, colors.black)
                 ])
                 elements.append(scores_premier_table)
-                elements.append(Spacer(1, 12))
+            else:
+                elements.append(Paragraph("No hay datos de criterios disponibles para el Portafolio Premier.", styles['BodyText']))
+            elements.append(Spacer(1, 12))
 
-                pie_premier_img = io.BytesIO()
-                fig_pie_premier.write_image(pie_premier_img, format='png')
-                elements.append(Image(pie_premier_img, width=300, height=200))
-                if fig_line_premier:
-                    line_premier_img = io.BytesIO()
-                    fig_line_premier.write_image(line_premier_img, format='png')
-                    elements.append(Image(line_premier_img, width=300, height=200))
-                elements.append(PageBreak())
+            elements.append(PageBreak())
 
-                elements.append(Paragraph("Resumen de Resultados", styles['Heading2']))
-                elements.append(Paragraph(summary, styles['BodyText']))
-                elements.append(Spacer(1, 12))
+            elements.append(Paragraph("Resumen de Resultados", styles['Heading2']))
+            elements.append(Paragraph(summary, styles['BodyText']))
+            elements.append(Spacer(1, 12))
 
-                doc.build(elements)
-                pdf_buffer.seek(0)
-                with open("report.pdf", "wb") as f:
-                    f.write(pdf_buffer.read())
+            doc.build(elements)
+            pdf_buffer.seek(0)
+            return pdf_buffer
 
-            generate_pdf_report()
-            with open("report.pdf", "rb") as file:
-                st.download_button("Descargar Informe PDF", file, file_name="report.pdf")
+        with st.spinner("Generando informe PDF..."):
+            if 'report_data' in st.session_state:
+                pdf_buffer = generate_pdf_report(
+                    st.session_state['report_data'],
+                    risk_tolerance,
+                    investment_horizon,
+                    financial_objective,
+                    financial_situation,
+                    market_knowledge,
+                    liquidity_need,
+                    age
+                )
+                st.download_button(
+                    label="Descargar Informe PDF",
+                    data=pdf_buffer,
+                    file_name="reporte_portafolio.pdf",
+                    mime="application/pdf"
+                )
+            else:
+                st.error("No se encontraron datos para generar el informe. Por favor, calcula los portafolios primero.")
