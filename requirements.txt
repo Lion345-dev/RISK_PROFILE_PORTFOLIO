@@ -1,10 +1,10 @@
-yfinance
-pandas
-numpy<2.0
-scipy<1.14.0
 streamlit
+pandas
+numpy
+yfinance
 plotly
 reportlab
-anthropic
-python-dotenv
 requests
+python-dotenv
+scipy
+anthropic
